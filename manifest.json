@@ -1,0 +1,32 @@
+{
+  "id": "/",
+  "short_name": "Demo",
+  "name": "Groupware Demo",
+  "description": "Groupware demo web application",
+  "icons": [
+    {
+      "src": "duck.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon",
+      "purpose": "any"
+    },
+    {
+      "src": "duck.ico",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any"
+    },
+    {
+      "src": "duck.ico",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    }
+  ],
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#1e293b",
+  "background_color": "#f5f6fa",
+  "scope": "/"
+}
