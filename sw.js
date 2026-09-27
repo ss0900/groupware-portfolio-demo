@@ -4,7 +4,10 @@ const BADGE_FILE = "duck.ico";
 const LATEST_NOTIFICATION_TAG = "demo-latest-notification";
 const SET_APP_BADGE_MESSAGE_TYPE = "DEMO_SET_APP_BADGE";
 const APP_BADGE_REFRESH_REQUEST_TYPE = "DEMO_APP_BADGE_REFRESH_REQUEST";
+const SET_ACTIVE_CHAT_WINDOWS_MESSAGE_TYPE = "P6IX_SET_ACTIVE_CHAT_WINDOWS";
+const ACTIVE_CHAT_WINDOW_TTL_MS = 45000;
 let lastClientBadgeCount = null;
+const activeChatWindowsByClientId = new Map();
 const SCOPE_URL = new URL(self.registration.scope);
 const SCOPE_ORIGIN = SCOPE_URL.origin;
 const SCOPE_PATH = SCOPE_URL.pathname.endsWith("/")
@@ -28,6 +31,12 @@ const getPayloadBadgeCount = (payload) => {
     if (count !== null) return count;
   }
   return null;
+};
+
+const normalizeConversationId = (value) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return String(Math.floor(parsed));
 };
 
 const setAppBadgeCount = async (count) => {
@@ -121,6 +130,91 @@ const hasFocusedClient = async (scopedClients = null) => {
   return clients.some((client) => client.focused);
 };
 
+const isVisibleWindowClient = (client) => {
+  if (client?.visibilityState) return client.visibilityState === "visible";
+  return Boolean(client?.focused);
+};
+
+const getConversationIdFromUrl = (url) => {
+  try {
+    const parsedUrl = new URL(url, self.registration.scope);
+    return normalizeConversationId(parsedUrl.searchParams.get("open_chat"));
+  } catch {
+    return null;
+  }
+};
+
+const getPushConversationId = (payload) => {
+  const directCandidates = [
+    payload.conversationId,
+    payload.conversation_id,
+    payload.chatConversationId,
+    payload.chat_conversation_id,
+  ];
+
+  for (const candidate of directCandidates) {
+    const normalized = normalizeConversationId(candidate);
+    if (normalized) return normalized;
+  }
+
+  const urlCandidates = [payload.url, payload.link, payload.targetUrl, payload.target_url];
+  for (const candidate of urlCandidates) {
+    const normalized = getConversationIdFromUrl(candidate);
+    if (normalized) return normalized;
+  }
+
+  return null;
+};
+
+const pruneActiveChatWindows = () => {
+  const now = Date.now();
+  activeChatWindowsByClientId.forEach((state, clientId) => {
+    if (!state?.visible || now - Number(state.updatedAt || 0) > ACTIVE_CHAT_WINDOW_TTL_MS) {
+      activeChatWindowsByClientId.delete(clientId);
+    }
+  });
+};
+
+const isConversationActiveInClientState = (conversationId) => {
+  pruneActiveChatWindows();
+  if (!conversationId) return false;
+
+  for (const state of activeChatWindowsByClientId.values()) {
+    if (
+      state.visible &&
+      Array.isArray(state.conversationIds) &&
+      state.conversationIds.includes(conversationId)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const isConversationVisibleInClientUrls = (conversationId, scopedClients = []) => {
+  if (!conversationId) return false;
+
+  return scopedClients.some(
+    (client) =>
+      isVisibleWindowClient(client) &&
+      getConversationIdFromUrl(client.url) === conversationId,
+  );
+};
+
+const shouldSuppressPushNotification = async (payload, scopedClients = null) => {
+  if (payload.pushKind !== "chat_message") return false;
+
+  const conversationId = getPushConversationId(payload);
+  if (!conversationId) return false;
+
+  const clients = scopedClients || (await getScopedWindowClients());
+  return (
+    isConversationActiveInClientState(conversationId) ||
+    isConversationVisibleInClientUrls(conversationId, clients)
+  );
+};
+
 const requestClientBadgeRefresh = async (scopedClients = null) => {
   const clients = scopedClients || (await getScopedWindowClients());
   clients.forEach((client) => {
@@ -138,6 +232,28 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("message", (event) => {
   const payload = event.data || {};
+  if (payload.type === SET_ACTIVE_CHAT_WINDOWS_MESSAGE_TYPE) {
+    const sourceClientId =
+      event.source?.id || String(payload.clientId || "unknown-client");
+    const conversationIds = Array.isArray(payload.conversationIds)
+      ? payload.conversationIds
+          .map((conversationId) => normalizeConversationId(conversationId))
+          .filter(Boolean)
+      : [];
+
+    if (!payload.visible || conversationIds.length === 0) {
+      activeChatWindowsByClientId.delete(sourceClientId);
+      return;
+    }
+
+    activeChatWindowsByClientId.set(sourceClientId, {
+      conversationIds,
+      visible: true,
+      updatedAt: Date.now(),
+    });
+    return;
+  }
+
   if (payload.type !== SET_APP_BADGE_MESSAGE_TYPE) return;
 
   const badgeCount = normalizeBadgeCount(payload.badgeCount ?? payload.count);
@@ -187,9 +303,12 @@ self.addEventListener("push", (event) => {
                 : setAppBadgeCount(lastClientBadgeCount)
             )
           : setAppBadgeCount(getPayloadBadgeCount(payload)),
-        hasFocusedClient(scopedClients).then((focused) => {
-        if (focused) return undefined;
-        return self.registration.showNotification(title, options);
+        shouldSuppressPushNotification(payload, scopedClients).then((suppressed) => {
+          if (suppressed) return undefined;
+          return hasFocusedClient(scopedClients).then((focused) => {
+            if (focused) return undefined;
+            return self.registration.showNotification(title, options);
+          });
         }),
       ])
     )
